@@ -4,9 +4,9 @@ Uses Pydantic BaseSettings and SettingsConfigDict.
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Any
 from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Ensure environment variables from .env are explicitly loaded
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
         default="LKR",
         description="Default currency code"
     )
-    CORS_ORIGINS: List[str] = Field(
+    CORS_ORIGINS: Any = Field(
         default=["*"],
         description="Allowed CORS origins"
     )
@@ -79,6 +79,21 @@ class Settings(BaseSettings):
         description="JWT Refresh Token expiration time in days (30 days)"
     )
 
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: Any) -> List[str]:
+        if isinstance(v, str):
+            if v.startswith("[") and v.endswith("]"):
+                import json
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        if isinstance(v, list):
+            return v
+        return ["*"]
+
     @property
     def effective_db_path(self) -> str:
         """
@@ -86,19 +101,37 @@ class Settings(BaseSettings):
         Automatically switches to writable /tmp directory when running in Vercel or serverless environments.
         """
         import os
-        if os.getenv("VERCEL") or os.getenv("SERVERLESS") or os.getenv("NOW_BUILDER"):
+        if (
+            os.getenv("VERCEL") or
+            os.getenv("VERCEL_ENV") or
+            os.getenv("AWS_LAMBDA_FUNCTION_NAME") or
+            os.getenv("SERVERLESS") or
+            os.getenv("NOW_BUILDER") or
+            self.APP_ENV == "production"
+        ):
             return "sqlite:////tmp/expenses.db"
-        return self.DB_PATH
+
+        # Fallback check if local data directory is not writable
+        try:
+            self.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            return self.DB_PATH
+        except Exception:
+            return "sqlite:////tmp/expenses.db"
 
     def setup_directories(self) -> None:
-        """Ensure necessary data storage directories exist."""
+        """Ensure necessary data storage directories exist when writable."""
         import os
-        if not (os.getenv("VERCEL") or os.getenv("SERVERLESS") or os.getenv("NOW_BUILDER")):
+        if not (os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or os.getenv("SERVERLESS")):
             try:
                 self.DATA_DIR.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
 
 
-settings = Settings()
+try:
+    settings = Settings()
+except Exception as _e:
+    # Safe fallback if environment variable validation fails
+    settings = Settings(_env_file=None)
+
 settings.setup_directories()

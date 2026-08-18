@@ -78,8 +78,14 @@ def init_db() -> None:
             conn.execute(text("SELECT id, email, refresh_token_hash, api_key_hash FROM users LIMIT 1"))
 
     except Exception as e:
-        # In local development mode, if schema mismatch occurs, recreate tables cleanly
-        if settings.DEBUG or settings.APP_ENV == "development":
+        import os
+        if os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("SERVERLESS"):
+            print(f"[Database Init Serverless] Notice: {e}. Ensuring tables exist...")
+            try:
+                Base.metadata.create_all(bind=engine)
+            except Exception:
+                pass
+        elif settings.DEBUG or settings.APP_ENV == "development":
             print(f"[Database Init] Schema mismatch/error detected ({e}). Recreating database tables for development mode...")
             try:
                 Base.metadata.drop_all(bind=engine)
