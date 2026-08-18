@@ -79,9 +79,25 @@ class Settings(BaseSettings):
         description="JWT Refresh Token expiration time in days (30 days)"
     )
 
+    @property
+    def effective_db_path(self) -> str:
+        """
+        Return active database connection URL string.
+        Automatically switches to writable /tmp directory when running in Vercel or serverless environments.
+        """
+        import os
+        if os.getenv("VERCEL") or os.getenv("SERVERLESS") or os.getenv("NOW_BUILDER"):
+            return "sqlite:////tmp/expenses.db"
+        return self.DB_PATH
+
     def setup_directories(self) -> None:
         """Ensure necessary data storage directories exist."""
-        self.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        import os
+        if not (os.getenv("VERCEL") or os.getenv("SERVERLESS") or os.getenv("NOW_BUILDER")):
+            try:
+                self.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
 
 
 settings = Settings()

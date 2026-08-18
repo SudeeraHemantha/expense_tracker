@@ -14,12 +14,13 @@ class Base(DeclarativeBase):
 
 
 # SQLite connection arguments for multithreaded access
+db_url = settings.effective_db_path
 connect_args = {}
-if settings.DB_PATH.startswith("sqlite"):
+if db_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
 
 engine = create_engine(
-    settings.DB_PATH,
+    db_url,
     connect_args=connect_args,
     echo=settings.DEBUG,
 )
