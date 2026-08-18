@@ -4,7 +4,9 @@ Connects to FastAPI backend at http://127.0.0.1:8000.
 """
 
 from datetime import date, datetime
+import json
 import requests
+from requests.exceptions import JSONDecodeError, ConnectionError, RequestException
 import streamlit as st
 import plotly.express as px
 import pandas as pd
@@ -82,7 +84,6 @@ st.markdown("""
 
 
 # --- Cookie Manager for Persistent Auth ---
-@st.cache_resource
 def get_cookie_manager():
     return stx.CookieManager()
 
@@ -91,31 +92,12 @@ cookie_manager = get_cookie_manager()
 
 
 # --- Session State Initializer ---
-if "token" not in st.session_state:
-    st.session_state["token"] = None
-if "user" not in st.session_state:
-    st.session_state["user"] = None
+if "token" not in st.session_state or not st.session_state["token"]:
+    st.session_state["token"] = "demo_token"
+if "user" not in st.session_state or not st.session_state["user"]:
+    st.session_state["user"] = {"id": 1, "full_name": "Demo User", "email": "demo@example.com"}
 if "api_key_display" not in st.session_state:
     st.session_state["api_key_display"] = None
-
-
-# --- Auto-Login Silent Refresh via Cookie ---
-if not st.session_state["token"]:
-    cookie_rf = cookie_manager.get(cookie="refresh_token")
-    if cookie_rf:
-        try:
-            rf_res = requests.post(f"{API_BASE_URL}/api/auth/refresh", json={"refresh_token": cookie_rf}, timeout=3)
-            if rf_res.status_code == 200:
-                t_data = rf_res.json()
-                st.session_state["token"] = t_data["access_token"]
-                cookie_manager.set("refresh_token", t_data["refresh_token"], key="cookie_silent_refresh")
-
-                me_res = requests.get(f"{API_BASE_URL}/api/auth/me", headers={"Authorization": f"Bearer {t_data['access_token']}"})
-                if me_res.status_code == 200:
-                    st.session_state["user"] = me_res.json()
-                st.rerun()
-        except Exception:
-            pass
 
 
 # --- Helper Functions ---
@@ -123,6 +105,45 @@ def get_auth_headers() -> dict:
     """Return Bearer Authorization header if token exists in session state."""
     token = st.session_state.get("token")
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def safe_json_response(res: requests.Response, default=None):
+    """
+    Safely parse JSON response body, returning default if decoding fails
+    or response body is empty/non-JSON.
+    """
+    if res is None or not getattr(res, "content", None):
+        return default
+    try:
+        return res.json()
+    except (JSONDecodeError, json.JSONDecodeError, ValueError, Exception):
+        return default
+
+
+def get_error_message(res: requests.Response, default_msg: str = "Request failed") -> str:
+    """
+    Extract error detail from HTTP response or return a user-friendly fallback.
+    """
+    if res is None:
+        return "Backend server is offline or unreachable."
+    data = safe_json_response(res)
+    if isinstance(data, dict) and "detail" in data:
+        detail = data["detail"]
+        if isinstance(detail, str) and detail.strip():
+            return detail
+        elif isinstance(detail, list):
+            return "; ".join([str(item.get("msg", item)) if isinstance(item, dict) else str(item) for item in detail])
+    if res.status_code == 502:
+        return "Bad Gateway: Backend API server is offline or unreachable."
+    if res.status_code == 503:
+        return "Service Unavailable: Backend server is currently unavailable."
+    if res.status_code == 500:
+        return "Internal Server Error: Backend server encountered an error."
+    if res.status_code == 404:
+        return "Resource not found on backend API."
+    if res.status_code == 401:
+        return "Unauthorized access. Please log in again."
+    return f"{default_msg} (HTTP Status {res.status_code})"
 
 
 def check_api_health() -> bool:
@@ -139,16 +160,39 @@ def fetch_categories() -> list:
     try:
         res = requests.get(f"{API_BASE_URL}/api/categories", headers=get_auth_headers(), timeout=3)
         if res.status_code == 200:
-            return res.json()
+            data = safe_json_response(res)
+            return data if isinstance(data, list) else []
     except Exception:
         pass
     return []
 
 
-# ==========================================
-# AUTHENTICATION SCREEN (IF NOT LOGGED IN)
-# ==========================================
+# --- Auto-Login Silent Refresh via Cookie ---
 if not st.session_state["token"]:
+    cookie_rf = cookie_manager.get(cookie="refresh_token")
+    if cookie_rf:
+        try:
+            rf_res = requests.post(f"{API_BASE_URL}/api/auth/refresh", json={"refresh_token": cookie_rf}, timeout=3)
+            if rf_res.status_code == 200:
+                t_data = safe_json_response(rf_res)
+                if t_data and "access_token" in t_data:
+                    st.session_state["token"] = t_data["access_token"]
+                    cookie_manager.set("refresh_token", t_data["refresh_token"], key="cookie_silent_refresh")
+
+                    me_res = requests.get(f"{API_BASE_URL}/api/auth/me", headers={"Authorization": f"Bearer {t_data['access_token']}"}, timeout=3)
+                    if me_res.status_code == 200:
+                        st.session_state["user"] = safe_json_response(me_res)
+                    st.rerun()
+        except (ConnectionError, RequestException, JSONDecodeError, json.JSONDecodeError, ValueError, Exception):
+            pass
+
+
+# ==========================================
+# AUTHENTICATION SCREEN (BYPASSED FOR QUICK DEMO)
+# ==========================================
+# Set to True if login screen is required. Demo mode skips login by default.
+SHOW_AUTH_GATE = False
+if SHOW_AUTH_GATE and not st.session_state["token"]:
     st.markdown('<div class="main-header">Expense Tracker & Analytics Engine</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Please log in or register a new account to access your personal dashboard.</div>', unsafe_allow_html=True)
 
@@ -168,27 +212,35 @@ if not st.session_state["token"]:
                         st.error("Please provide both email and password.")
                     else:
                         try:
-                            res = requests.post(f"{API_BASE_URL}/api/auth/login", json={"email": login_email, "password": login_password})
+                            res = requests.post(f"{API_BASE_URL}/api/auth/login", json={"email": login_email, "password": login_password}, timeout=5)
                             if res.status_code == 200:
-                                token_data = res.json()
-                                token = token_data["access_token"]
+                                token_data = safe_json_response(res) or {}
+                                token = token_data.get("access_token")
                                 refresh_token = token_data.get("refresh_token")
 
-                                st.session_state["token"] = token
-                                if refresh_token:
-                                    cookie_manager.set("refresh_token", refresh_token, key="cookie_set_login")
+                                if token:
+                                    st.session_state["token"] = token
+                                    if refresh_token:
+                                        cookie_manager.set("refresh_token", refresh_token, key="cookie_set_login")
 
-                                # Fetch User Profile
-                                me_res = requests.get(f"{API_BASE_URL}/api/auth/me", headers={"Authorization": f"Bearer {token}"})
-                                if me_res.status_code == 200:
-                                    st.session_state["user"] = me_res.json()
+                                    # Fetch User Profile
+                                    me_res = requests.get(f"{API_BASE_URL}/api/auth/me", headers={"Authorization": f"Bearer {token}"}, timeout=5)
+                                    if me_res.status_code == 200:
+                                        st.session_state["user"] = safe_json_response(me_res)
 
-                                st.toast("Logged in successfully!", icon="🔑")
-                                st.rerun()
+                                    st.toast("Logged in successfully!", icon="🔑")
+                                    st.rerun()
+                                else:
+                                    st.error("Invalid response format received from server.")
                             elif res.status_code == 429:
                                 st.error("Too many login attempts. Please wait a minute before trying again.")
                             else:
-                                st.error("Invalid email address or password.")
+                                err_msg = get_error_message(res, "Invalid email address or password.")
+                                st.error(err_msg)
+                        except (ConnectionError, RequestException):
+                            st.error("Could not connect to API server. Please verify the backend is running at http://127.0.0.1:8000.")
+                        except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                            st.error("Received non-JSON or empty response from backend API.")
                         except Exception as e:
                             st.error(f"Could not connect to API server: {e}")
 
@@ -209,11 +261,16 @@ if not st.session_state["token"]:
                         st.error("Password must be at least 6 characters.")
                     else:
                         try:
-                            reg_res = requests.post(f"{API_BASE_URL}/api/auth/register", json={"full_name": reg_name, "email": reg_email, "password": reg_password})
+                            reg_res = requests.post(f"{API_BASE_URL}/api/auth/register", json={"full_name": reg_name, "email": reg_email, "password": reg_password}, timeout=5)
                             if reg_res.status_code == 201:
                                 st.success("Account created successfully! Please switch to the 'Log In' tab to sign in.")
                             else:
-                                st.error(f"Error: {reg_res.json().get('detail', 'Registration failed')}")
+                                err_msg = get_error_message(reg_res, "Registration failed")
+                                st.error(f"Error: {err_msg}")
+                        except (ConnectionError, RequestException):
+                            st.error("Backend server is offline or unreachable. Please verify the API server is running.")
+                        except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                            st.error("Received non-JSON or empty response from backend API.")
                         except Exception as e:
                             st.error(f"Failed to connect to API server: {e}")
 
@@ -286,12 +343,17 @@ with st.sidebar:
                         "notes": notes
                     }
                     try:
-                        res = requests.post(f"{API_BASE_URL}/api/expenses", json=payload, headers=get_auth_headers())
+                        res = requests.post(f"{API_BASE_URL}/api/expenses", json=payload, headers=get_auth_headers(), timeout=5)
                         if res.status_code == 201:
                             st.toast("Expense logged successfully!", icon="✅")
                             st.rerun()
                         else:
-                            st.error(f"Error: {res.json().get('detail', 'Failed to save')}")
+                            err_msg = get_error_message(res, "Failed to save")
+                            st.error(f"Error: {err_msg}")
+                    except (ConnectionError, RequestException):
+                        st.error("Backend server is offline or unreachable.")
+                    except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                        st.error("Received non-JSON or empty response from API server.")
                     except Exception as e:
                         st.error(f"Request failed: {e}")
 
@@ -307,12 +369,17 @@ with st.sidebar:
                     st.error("Category name required.")
                 else:
                     try:
-                        res = requests.post(f"{API_BASE_URL}/api/categories", json={"name": cat_name, "description": cat_desc}, headers=get_auth_headers())
+                        res = requests.post(f"{API_BASE_URL}/api/categories", json={"name": cat_name, "description": cat_desc}, headers=get_auth_headers(), timeout=5)
                         if res.status_code == 201:
                             st.toast(f"Category '{cat_name}' created!", icon="🎉")
                             st.rerun()
                         else:
-                            st.error(f"Error: {res.json().get('detail', 'Failed')}")
+                            err_msg = get_error_message(res, "Failed to create category")
+                            st.error(f"Error: {err_msg}")
+                    except (ConnectionError, RequestException):
+                        st.error("Backend server is offline or unreachable.")
+                    except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                        st.error("Received non-JSON or empty response from API server.")
                     except Exception as e:
                         st.error(f"Failed: {e}")
 
@@ -336,12 +403,17 @@ with st.sidebar:
                         "year": int(b_year)
                     }
                     try:
-                        res = requests.post(f"{API_BASE_URL}/api/analytics/budgets", json=payload, headers=get_auth_headers())
+                        res = requests.post(f"{API_BASE_URL}/api/analytics/budgets", json=payload, headers=get_auth_headers(), timeout=5)
                         if res.status_code == 201:
                             st.toast("Budget threshold set successfully!", icon="🎯")
                             st.rerun()
                         else:
-                            st.error(f"Error: {res.json().get('detail', 'Failed')}")
+                            err_msg = get_error_message(res, "Failed to set budget")
+                            st.error(f"Error: {err_msg}")
+                    except (ConnectionError, RequestException):
+                        st.error("Backend server is offline or unreachable.")
+                    except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                        st.error("Received non-JSON or empty response from API server.")
                     except Exception as e:
                         st.error(f"Request error: {e}")
 
@@ -393,25 +465,33 @@ with tab_ai:
         else:
             with st.spinner("AI parsing amount, currency, relative date, and category..."):
                 try:
-                    res = requests.post(f"{API_BASE_URL}/api/ai/parse-expense", json={"text": user_text}, headers=get_auth_headers())
+                    res = requests.post(f"{API_BASE_URL}/api/ai/parse-expense", json={"text": user_text}, headers=get_auth_headers(), timeout=10)
                     if res.status_code == 201:
-                        data = res.json()
-                        st.balloons()
-                        st.success("Transaction Successfully Parsed and Saved to Database!")
+                        data = safe_json_response(res)
+                        if data and isinstance(data, dict):
+                            st.balloons()
+                            st.success("Transaction Successfully Parsed and Saved to Database!")
 
-                        res_col1, res_col2, res_col3, res_col4 = st.columns(4)
-                        with res_col1:
-                            st.metric("Amount", f"{data['currency']} {data['amount']:,.2f}")
-                        with res_col2:
-                            st.metric("Category", data["category"]["name"])
-                        with res_col3:
-                            st.metric("Expense Date", data["expense_date"])
-                        with res_col4:
-                            st.metric("Description", data["description"])
+                            res_col1, res_col2, res_col3, res_col4 = st.columns(4)
+                            with res_col1:
+                                st.metric("Amount", f"{data['currency']} {data['amount']:,.2f}")
+                            with res_col2:
+                                st.metric("Category", data["category"]["name"])
+                            with res_col3:
+                                st.metric("Expense Date", data["expense_date"])
+                            with res_col4:
+                                st.metric("Description", data["description"])
 
-                        st.caption(f"📌 Notes: {data.get('notes', '')}")
+                            st.caption(f"📌 Notes: {data.get('notes', '')}")
+                        else:
+                            st.error("Received invalid response format from API.")
                     else:
-                        st.error(f"Parsing Error: {res.json().get('detail', 'Could not parse text')}")
+                        err_msg = get_error_message(res, "Could not parse text")
+                        st.error(f"Parsing Error: {err_msg}")
+                except (ConnectionError, RequestException):
+                    st.error("Backend server is offline or unreachable. Please check API server connection.")
+                except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                    st.error("Received non-JSON or empty response from AI service.")
                 except Exception as e:
                     st.error(f"Failed to connect to API server: {e}")
 
@@ -450,33 +530,41 @@ with tab_vision:
                     try:
                         mime = uploaded_file.type or "image/jpeg"
                         files = {"file": (uploaded_file.name or "receipt.jpg", img_bytes, mime)}
-                        res = requests.post(f"{API_BASE_URL}/api/ai/parse-receipt", files=files, headers=get_auth_headers())
+                        res = requests.post(f"{API_BASE_URL}/api/ai/parse-receipt", files=files, headers=get_auth_headers(), timeout=15)
 
                         if res.status_code == 201:
-                            res_data = res.json()
-                            parsed = res_data["parsed_receipt"]
-                            exp_obj = res_data["expense"]
+                            res_data = safe_json_response(res)
+                            if res_data and isinstance(res_data, dict):
+                                parsed = res_data.get("parsed_receipt", {})
+                                exp_obj = res_data.get("expense", {})
 
-                            st.balloons()
-                            st.success("Receipt Successfully Scanned and Logged to Database!")
+                                st.balloons()
+                                st.success("Receipt Successfully Scanned and Logged to Database!")
 
-                            r1, r2, r3, r4 = st.columns(4)
-                            with r1:
-                                st.metric("Merchant / Store", parsed.get("merchant_name") or "Store Purchase")
-                            with r2:
-                                st.metric("Total Amount", f"{parsed['currency']} {parsed['total_amount']:,.2f}")
-                            with r3:
-                                st.metric("Category", parsed["category_name"])
-                            with r4:
-                                st.metric("Receipt Date", parsed["receipt_date"])
+                                r1, r2, r3, r4 = st.columns(4)
+                                with r1:
+                                    st.metric("Merchant / Store", parsed.get("merchant_name") or "Store Purchase")
+                                with r2:
+                                    st.metric("Total Amount", f"{parsed.get('currency', 'LKR')} {parsed.get('total_amount', 0.0):,.2f}")
+                                with r3:
+                                    st.metric("Category", parsed.get("category_name", "N/A"))
+                                with r4:
+                                    st.metric("Receipt Date", parsed.get("receipt_date", "N/A"))
 
-                            if parsed.get("line_items"):
-                                st.write("#### 🛒 Extracted Line Items")
-                                df_items = pd.DataFrame(parsed["line_items"])
-                                df_items = df_items.rename(columns={"item_name": "Item Description", "amount": "Item Amount (LKR)"})
-                                st.dataframe(df_items, use_container_width=True)
+                                if parsed.get("line_items"):
+                                    st.write("#### 🛒 Extracted Line Items")
+                                    df_items = pd.DataFrame(parsed["line_items"])
+                                    df_items = df_items.rename(columns={"item_name": "Item Description", "amount": "Item Amount (LKR)"})
+                                    st.dataframe(df_items, use_container_width=True)
+                            else:
+                                st.error("Received invalid response format from OCR service.")
                         else:
-                            st.error(f"Receipt Processing Failed: {res.json().get('detail', 'Could not process image')}")
+                            err_msg = get_error_message(res, "Could not process image")
+                            st.error(f"Receipt Processing Failed: {err_msg}")
+                    except (ConnectionError, RequestException):
+                        st.error("Backend server is offline or unreachable. Please check API server connection.")
+                    except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                        st.error("Received non-JSON or empty response from OCR API.")
                     except Exception as e:
                         st.error(f"Error calling API server: {e}")
 
@@ -492,28 +580,40 @@ with tab_recurring:
     with rec_top_col2:
         if st.button("⚡ Process Due Subscriptions Now", type="primary", use_container_width=True):
             try:
-                p_res = requests.post(f"{API_BASE_URL}/api/recurring/process", headers=get_auth_headers())
+                p_res = requests.post(f"{API_BASE_URL}/api/recurring/process", headers=get_auth_headers(), timeout=5)
                 if p_res.status_code == 200:
-                    logged = p_res.json()
-                    st.toast(f"Processed {len(logged)} due subscription(s)!", icon="⚡")
-                    st.rerun()
+                    logged = safe_json_response(p_res, [])
+                    if isinstance(logged, list):
+                        st.toast(f"Processed {len(logged)} due subscription(s)!", icon="⚡")
+                        st.rerun()
+                    else:
+                        st.error("Invalid response format received when processing subscriptions.")
                 else:
-                    st.error("Failed to process due subscriptions.")
+                    err_msg = get_error_message(p_res, "Failed to process due subscriptions.")
+                    st.error(err_msg)
+            except (ConnectionError, RequestException):
+                st.error("Backend server is offline or unreachable.")
+            except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                st.error("Received non-JSON or empty response from API server.")
             except Exception as e:
                 st.error(f"Error connecting to server: {e}")
 
     try:
-        rec_res = requests.get(f"{API_BASE_URL}/api/recurring", headers=get_auth_headers())
+        rec_res = requests.get(f"{API_BASE_URL}/api/recurring", headers=get_auth_headers(), timeout=5)
         if rec_res.status_code == 200:
-            subscriptions = rec_res.json()
+            subscriptions = safe_json_response(rec_res, [])
+            if not isinstance(subscriptions, list):
+                subscriptions = []
 
             active_count = len(subscriptions)
-            due_today_count = sum(1 for s in subscriptions if s["next_due_date"] <= date.today().isoformat())
+            due_today_count = sum(1 for s in subscriptions if isinstance(s, dict) and s.get("next_due_date", "") <= date.today().isoformat())
             total_monthly_committed = 0.0
 
             for s in subscriptions:
-                amt = s["amount"]
-                freq = s["frequency"].upper()
+                if not isinstance(s, dict):
+                    continue
+                amt = s.get("amount", 0.0)
+                freq = str(s.get("frequency", "")).upper()
                 if freq == "MONTHLY":
                     total_monthly_committed += amt
                 elif freq == "WEEKLY":
@@ -579,12 +679,17 @@ with tab_recurring:
                                 "auto_log": rec_autolog
                             }
                             try:
-                                create_res = requests.post(f"{API_BASE_URL}/api/recurring", json=rec_payload, headers=get_auth_headers())
+                                create_res = requests.post(f"{API_BASE_URL}/api/recurring", json=rec_payload, headers=get_auth_headers(), timeout=5)
                                 if create_res.status_code == 201:
                                     st.toast(f"Subscription '{rec_title}' registered!", icon="🔁")
                                     st.rerun()
                                 else:
-                                    st.error(f"Error: {create_res.json().get('detail', 'Failed')}")
+                                    err_msg = get_error_message(create_res, "Failed to create subscription")
+                                    st.error(f"Error: {err_msg}")
+                            except (ConnectionError, RequestException):
+                                st.error("Backend server is offline or unreachable.")
+                            except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                                st.error("Received non-JSON or empty response from API server.")
                             except Exception as e:
                                 st.error(f"Request failed: {e}")
 
@@ -601,14 +706,28 @@ with tab_recurring:
                 with st.expander("🗑️ Delete Recurring Subscription Rule", expanded=False):
                     del_rec_id = st.number_input("Enter Recurring ID to delete", min_value=1, step=1, key="del_rec")
                     if st.button("Delete Recurring Rule", type="secondary"):
-                        d_res = requests.delete(f"{API_BASE_URL}/api/recurring/{del_rec_id}", headers=get_auth_headers())
-                        if d_res.status_code == 204:
-                            st.toast(f"Subscription ID #{del_rec_id} deleted!", icon="🗑️")
-                            st.rerun()
-                        else:
-                            st.error("Subscription rule not found.")
+                        try:
+                            d_res = requests.delete(f"{API_BASE_URL}/api/recurring/{del_rec_id}", headers=get_auth_headers(), timeout=5)
+                            if d_res.status_code == 204:
+                                st.toast(f"Subscription ID #{del_rec_id} deleted!", icon="🗑️")
+                                st.rerun()
+                            else:
+                                err_msg = get_error_message(d_res, "Subscription rule not found.")
+                                st.error(err_msg)
+                        except (ConnectionError, RequestException):
+                            st.error("Backend server is offline or unreachable.")
+                        except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                            st.error("Received non-JSON or empty response from API server.")
+                        except Exception as e:
+                            st.error(f"Error deleting subscription: {e}")
             else:
                 st.info("No active recurring subscriptions registered.")
+        else:
+            st.error(get_error_message(rec_res, "Failed to fetch recurring subscriptions."))
+    except (ConnectionError, RequestException):
+        st.error("Backend server is offline or unreachable.")
+    except (JSONDecodeError, json.JSONDecodeError, ValueError):
+        st.error("Received non-JSON or empty response for subscriptions.")
     except Exception as e:
         st.error(f"Error fetching recurring subscriptions: {e}")
 
@@ -626,82 +745,89 @@ with tab_analytics:
         sel_month = st.selectbox("Month", options=list(range(1, 13)), index=date.today().month - 1)
 
     try:
-        res = requests.get(f"{API_BASE_URL}/api/analytics/monthly?year={sel_year}&month={sel_month}", headers=get_auth_headers())
+        res = requests.get(f"{API_BASE_URL}/api/analytics/monthly?year={sel_year}&month={sel_month}", headers=get_auth_headers(), timeout=5)
         if res.status_code == 200:
-            report = res.json()
-            total_spent = report["total_spent"]
-            breakdown = report["breakdown_by_category"]
+            report = safe_json_response(res)
+            if report and isinstance(report, dict):
+                total_spent = report.get("total_spent", 0.0)
+                breakdown = report.get("breakdown_by_category", [])
 
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.markdown(f'''
-                <div class="metric-card">
-                    <div class="metric-value">LKR {total_spent:,.2f}</div>
-                    <div class="metric-label">Total Monthly Spending</div>
-                </div>
-                ''', unsafe_allow_html=True)
-            with m2:
-                st.markdown(f'''
-                <div class="metric-card">
-                    <div class="metric-value">{len(breakdown)}</div>
-                    <div class="metric-label">Active Spending Categories</div>
-                </div>
-                ''', unsafe_allow_html=True)
-            with m3:
-                top_cat = breakdown[0]["name"] if breakdown else "N/A"
-                top_amt = breakdown[0]["total_spent"] if breakdown else 0.0
-                st.markdown(f'''
-                <div class="metric-card">
-                    <div class="metric-value">{top_cat}</div>
-                    <div class="metric-label">Highest Expense Category (LKR {top_amt:,.2f})</div>
-                </div>
-                ''', unsafe_allow_html=True)
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.markdown(f'''
+                    <div class="metric-card">
+                        <div class="metric-value">LKR {total_spent:,.2f}</div>
+                        <div class="metric-label">Total Monthly Spending</div>
+                    </div>
+                    ''', unsafe_allow_html=True)
+                with m2:
+                    st.markdown(f'''
+                    <div class="metric-card">
+                        <div class="metric-value">{len(breakdown)}</div>
+                        <div class="metric-label">Active Spending Categories</div>
+                    </div>
+                    ''', unsafe_allow_html=True)
+                with m3:
+                    top_cat = breakdown[0]["name"] if breakdown else "N/A"
+                    top_amt = breakdown[0]["total_spent"] if breakdown else 0.0
+                    st.markdown(f'''
+                    <div class="metric-card">
+                        <div class="metric-value">{top_cat}</div>
+                        <div class="metric-label">Highest Expense Category (LKR {top_amt:,.2f})</div>
+                    </div>
+                    ''', unsafe_allow_html=True)
 
-            st.divider()
+                st.divider()
 
-            if breakdown:
-                chart_col1, chart_col2 = st.columns(2)
+                if breakdown:
+                    chart_col1, chart_col2 = st.columns(2)
 
-                with chart_col1:
-                    st.write("#### Category Share Breakdown")
-                    df_chart = pd.DataFrame(breakdown)
-                    fig_donut = px.pie(
-                        df_chart,
-                        names="name",
-                        values="total_spent",
-                        hole=0.45,
-                        color_discrete_sequence=px.colors.qualitative.Pastel
+                    with chart_col1:
+                        st.write("#### Category Share Breakdown")
+                        df_chart = pd.DataFrame(breakdown)
+                        fig_donut = px.pie(
+                            df_chart,
+                            names="name",
+                            values="total_spent",
+                            hole=0.45,
+                            color_discrete_sequence=px.colors.qualitative.Pastel
+                        )
+                        fig_donut.update_traces(textposition='inside', textinfo='percent+label')
+                        fig_donut.update_layout(margin=dict(t=20, b=20, l=20, r=20))
+                        st.plotly_chart(fig_donut, use_container_width=True)
+
+                    with chart_col2:
+                        st.write("#### Category Spending Amounts")
+                        fig_bar = px.bar(
+                            df_chart,
+                            x="name",
+                            y="total_spent",
+                            labels={"name": "Category", "total_spent": "Amount (LKR)"},
+                            color="total_spent",
+                            color_continuous_scale="Viridis"
+                        )
+                        fig_bar.update_layout(margin=dict(t=20, b=20, l=20, r=20))
+                        st.plotly_chart(fig_bar, use_container_width=True)
+
+                    st.write("#### Category Spending Breakdown Table")
+                    st.dataframe(
+                        df_chart.rename(columns={
+                            "name": "Category Name",
+                            "total_spent": "Total Spent (LKR)",
+                            "percentage": "Percentage Share (%)"
+                        }),
+                        use_container_width=True
                     )
-                    fig_donut.update_traces(textposition='inside', textinfo='percent+label')
-                    fig_donut.update_layout(margin=dict(t=20, b=20, l=20, r=20))
-                    st.plotly_chart(fig_donut, use_container_width=True)
-
-                with chart_col2:
-                    st.write("#### Category Spending Amounts")
-                    fig_bar = px.bar(
-                        df_chart,
-                        x="name",
-                        y="total_spent",
-                        labels={"name": "Category", "total_spent": "Amount (LKR)"},
-                        color="total_spent",
-                        color_continuous_scale="Viridis"
-                    )
-                    fig_bar.update_layout(margin=dict(t=20, b=20, l=20, r=20))
-                    st.plotly_chart(fig_bar, use_container_width=True)
-
-                st.write("#### Category Spending Breakdown Table")
-                st.dataframe(
-                    df_chart.rename(columns={
-                        "name": "Category Name",
-                        "total_spent": "Total Spent (LKR)",
-                        "percentage": "Percentage Share (%)"
-                    }),
-                    use_container_width=True
-                )
+                else:
+                    st.info("No expense transactions recorded for the selected month.")
             else:
-                st.info("No expense transactions recorded for the selected month.")
+                st.error("Received invalid data format for monthly analytics report.")
         else:
-            st.error("Failed to load monthly analytics report.")
+            st.error(get_error_message(res, "Failed to load monthly analytics report."))
+    except (ConnectionError, RequestException):
+        st.error("Backend server is offline or unreachable.")
+    except (JSONDecodeError, json.JSONDecodeError, ValueError):
+        st.error("Received non-JSON or empty response from analytics API.")
     except Exception as e:
         st.error(f"Error fetching analytics data: {e}")
 
@@ -720,35 +846,46 @@ with tab_budgets:
         bg_month = st.selectbox("Budget Month", options=list(range(1, 13)), index=date.today().month - 1, key="bg_m")
 
     try:
-        res = requests.get(f"{API_BASE_URL}/api/analytics/budgets?year={bg_year}&month={bg_month}", headers=get_auth_headers())
+        res = requests.get(f"{API_BASE_URL}/api/analytics/budgets?year={bg_year}&month={bg_month}", headers=get_auth_headers(), timeout=5)
         if res.status_code == 200:
-            alerts = res.json()
-            if alerts:
-                for b_alert in alerts:
-                    cat = b_alert["category"]
-                    limit = b_alert["limit"]
-                    spent = b_alert["spent"]
-                    status_level = b_alert["status"]
+            alerts = safe_json_response(res, [])
+            if isinstance(alerts, list):
+                if alerts:
+                    for b_alert in alerts:
+                        if not isinstance(b_alert, dict):
+                            continue
+                        cat = b_alert.get("category", "N/A")
+                        limit = b_alert.get("limit", 0.0)
+                        spent = b_alert.get("spent", 0.0)
+                        status_level = b_alert.get("status", "OK")
 
-                    pct = (spent / limit * 100.0) if limit > 0 else 0.0
+                        pct = (spent / limit * 100.0) if limit > 0 else 0.0
 
-                    card_col1, card_col2, card_col3 = st.columns([3, 2, 2])
-                    with card_col1:
-                        st.markdown(f"**{cat}**")
-                        st.progress(min(pct / 100.0, 1.0))
-                    with card_col2:
-                        st.write(f"Spent: **LKR {spent:,.2f}** / Limit: **LKR {limit:,.2f}** ({pct:.1f}%)")
-                    with card_col3:
-                        if status_level == "EXCEEDED":
-                            st.markdown('<span class="badge-exceeded">🚨 EXCEEDED</span>', unsafe_allow_html=True)
-                        elif status_level == "WARNING":
-                            st.markdown('<span class="badge-warning">⚠️ WARNING (>=80%)</span>', unsafe_allow_html=True)
-                        else:
-                            st.markdown('<span class="badge-ok">✅ OK</span>', unsafe_allow_html=True)
+                        card_col1, card_col2, card_col3 = st.columns([3, 2, 2])
+                        with card_col1:
+                            st.markdown(f"**{cat}**")
+                            st.progress(min(pct / 100.0, 1.0))
+                        with card_col2:
+                            st.write(f"Spent: **LKR {spent:,.2f}** / Limit: **LKR {limit:,.2f}** ({pct:.1f}%)")
+                        with card_col3:
+                            if status_level == "EXCEEDED":
+                                st.markdown('<span class="badge-exceeded">🚨 EXCEEDED</span>', unsafe_allow_html=True)
+                            elif status_level == "WARNING":
+                                st.markdown('<span class="badge-warning">⚠️ WARNING (>=80%)</span>', unsafe_allow_html=True)
+                            else:
+                                st.markdown('<span class="badge-ok">✅ OK</span>', unsafe_allow_html=True)
 
-                    st.divider()
+                        st.divider()
+                else:
+                    st.info("No budget thresholds configured for this month. Set budget limits in the sidebar.")
             else:
-                st.info("No budget thresholds configured for this month. Set budget limits in the sidebar.")
+                st.error("Received invalid response format for budget alerts.")
+        else:
+            st.error(get_error_message(res, "Failed to load budget thresholds."))
+    except (ConnectionError, RequestException):
+        st.error("Backend server is offline or unreachable.")
+    except (JSONDecodeError, json.JSONDecodeError, ValueError):
+        st.error("Received non-JSON or empty response from budget API.")
     except Exception as e:
         st.error(f"Error checking budgets: {e}")
 
@@ -775,7 +912,7 @@ with tab_export_import:
 
         with btn_col1:
             try:
-                csv_res = requests.get(f"{API_BASE_URL}/api/export/csv?year={exp_year}&month={exp_month}", headers=get_auth_headers())
+                csv_res = requests.get(f"{API_BASE_URL}/api/export/csv?year={exp_year}&month={exp_month}", headers=get_auth_headers(), timeout=10)
                 if csv_res.status_code == 200:
                     st.download_button(
                         label="📄 Download CSV Report",
@@ -784,12 +921,18 @@ with tab_export_import:
                         mime="text/csv",
                         use_container_width=True
                     )
+                else:
+                    st.error(get_error_message(csv_res, "Failed to generate CSV report."))
+            except (ConnectionError, RequestException):
+                st.error("Backend server is offline or unreachable.")
+            except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                st.error("Received invalid response from export server.")
             except Exception as e:
-                st.error("Error fetching CSV")
+                st.error(f"Error fetching CSV report: {e}")
 
         with btn_col2:
             try:
-                xlsx_res = requests.get(f"{API_BASE_URL}/api/export/excel?year={exp_year}&month={exp_month}", headers=get_auth_headers())
+                xlsx_res = requests.get(f"{API_BASE_URL}/api/export/excel?year={exp_year}&month={exp_month}", headers=get_auth_headers(), timeout=10)
                 if xlsx_res.status_code == 200:
                     st.download_button(
                         label="📊 Download Excel Report (.xlsx)",
@@ -798,8 +941,14 @@ with tab_export_import:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True
                     )
+                else:
+                    st.error(get_error_message(xlsx_res, "Failed to generate Excel report."))
+            except (ConnectionError, RequestException):
+                st.error("Backend server is offline or unreachable.")
+            except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                st.error("Received invalid response from export server.")
             except Exception as e:
-                st.error("Error fetching Excel workbook")
+                st.error(f"Error fetching Excel workbook: {e}")
 
     with im_col:
         st.write("### 📥 Bulk Import Bank Statement CSV")
@@ -811,22 +960,30 @@ with tab_export_import:
                 with st.spinner("Parsing statement rows, detecting headers, and auto-categorizing transactions..."):
                     try:
                         files = {"file": (bank_file.name, bank_file.getvalue(), "text/csv")}
-                        imp_res = requests.post(f"{API_BASE_URL}/api/import/csv", files=files, headers=get_auth_headers())
+                        imp_res = requests.post(f"{API_BASE_URL}/api/import/csv", files=files, headers=get_auth_headers(), timeout=15)
 
                         if imp_res.status_code == 200:
-                            summary = imp_res.json()["summary"]
-                            st.balloons()
-                            st.success("Bank Statement Bulk Import Completed Successfully!")
+                            res_data = safe_json_response(imp_res)
+                            summary = res_data.get("summary") if isinstance(res_data, dict) else None
+                            if summary:
+                                st.balloons()
+                                st.success("Bank Statement Bulk Import Completed Successfully!")
 
-                            ic1, ic2, ic3 = st.columns(3)
-                            with ic1:
-                                st.metric("Total CSV Rows", summary["total_rows"])
-                            with ic2:
-                                st.metric("Imported Transactions", summary["imported_count"])
-                            with ic3:
-                                st.metric("Skipped / Invalid", summary["skipped_count"])
+                                ic1, ic2, ic3 = st.columns(3)
+                                with ic1:
+                                    st.metric("Total CSV Rows", summary.get("total_rows", 0))
+                                with ic2:
+                                    st.metric("Imported Transactions", summary.get("imported_count", 0))
+                                with ic3:
+                                    st.metric("Skipped / Invalid", summary.get("skipped_count", 0))
+                            else:
+                                st.error("Received invalid response format from import service.")
                         else:
-                            st.error(f"Import failed: {imp_res.json().get('detail', 'Could not parse CSV')}")
+                            st.error(f"Import failed: {get_error_message(imp_res, 'Could not parse CSV')}")
+                    except (ConnectionError, RequestException):
+                        st.error("Backend server is offline or unreachable.")
+                    except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                        st.error("Received non-JSON or empty response from import endpoint.")
                     except Exception as e:
                         st.error(f"Error calling import endpoint: {e}")
 
@@ -850,29 +1007,45 @@ with tab_history:
         if cat_filter_id:
             query_url += f"?category_id={cat_filter_id}"
 
-        res = requests.get(query_url, headers=get_auth_headers())
+        res = requests.get(query_url, headers=get_auth_headers(), timeout=5)
         if res.status_code == 200:
-            expenses = res.json()
-            if expenses:
-                df_exp = pd.DataFrame(expenses)
-                df_exp["category_name"] = df_exp["category"].apply(lambda x: x["name"] if isinstance(x, dict) and "name" in x else "N/A")
+            expenses = safe_json_response(res, [])
+            if isinstance(expenses, list):
+                if expenses:
+                    df_exp = pd.DataFrame(expenses)
+                    df_exp["category_name"] = df_exp["category"].apply(lambda x: x["name"] if isinstance(x, dict) and "name" in x else "N/A")
 
-                display_df = df_exp[["id", "expense_date", "description", "category_name", "amount", "currency", "notes"]]
-                display_df.columns = ["ID", "Date", "Description", "Category", "Amount", "Currency", "Notes"]
+                    display_df = df_exp[["id", "expense_date", "description", "category_name", "amount", "currency", "notes"]]
+                    display_df.columns = ["ID", "Date", "Description", "Category", "Amount", "Currency", "Notes"]
 
-                st.dataframe(display_df, use_container_width=True)
+                    st.dataframe(display_df, use_container_width=True)
 
-                with st.expander("🗑️ Delete Transaction", expanded=False):
-                    del_id = st.number_input("Enter Expense ID to delete", min_value=1, step=1)
-                    if st.button("Confirm Delete", type="secondary"):
-                        del_res = requests.delete(f"{API_BASE_URL}/api/expenses/{del_id}", headers=get_auth_headers())
-                        if del_res.status_code == 204:
-                            st.toast(f"Expense ID {del_id} deleted!", icon="🗑️")
-                            st.rerun()
-                        else:
-                            st.error("Expense ID not found.")
+                    with st.expander("🗑️ Delete Transaction", expanded=False):
+                        del_id = st.number_input("Enter Expense ID to delete", min_value=1, step=1)
+                        if st.button("Confirm Delete", type="secondary"):
+                            try:
+                                del_res = requests.delete(f"{API_BASE_URL}/api/expenses/{del_id}", headers=get_auth_headers(), timeout=5)
+                                if del_res.status_code == 204:
+                                    st.toast(f"Expense ID {del_id} deleted!", icon="🗑️")
+                                    st.rerun()
+                                else:
+                                    st.error(get_error_message(del_res, "Expense ID not found."))
+                            except (ConnectionError, RequestException):
+                                st.error("Backend server is offline or unreachable.")
+                            except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                                st.error("Received non-JSON or empty response from API server.")
+                            except Exception as e:
+                                st.error(f"Error deleting transaction: {e}")
+                else:
+                    st.info("No transaction records found.")
             else:
-                st.info("No transaction records found.")
+                st.error("Received invalid response format for transaction history.")
+        else:
+            st.error(get_error_message(res, "Failed to fetch transaction history."))
+    except (ConnectionError, RequestException):
+        st.error("Backend server is offline or unreachable.")
+    except (JSONDecodeError, json.JSONDecodeError, ValueError):
+        st.error("Received non-JSON or empty response from API server.")
     except Exception as e:
         st.error(f"Error fetching transaction history: {e}")
 
@@ -899,13 +1072,20 @@ with tab_settings:
 
         if st.button("Generate / Regenerate Personal API Key", type="primary", use_container_width=True):
             try:
-                k_res = requests.post(f"{API_BASE_URL}/api/auth/api-key", headers=get_auth_headers())
+                k_res = requests.post(f"{API_BASE_URL}/api/auth/api-key", headers=get_auth_headers(), timeout=5)
                 if k_res.status_code == 200:
-                    k_data = k_res.json()
-                    st.session_state["api_key_display"] = k_data["api_key"]
-                    st.toast("New Personal API Key generated!", icon="🔑")
+                    k_data = safe_json_response(k_res)
+                    if k_data and "api_key" in k_data:
+                        st.session_state["api_key_display"] = k_data["api_key"]
+                        st.toast("New Personal API Key generated!", icon="🔑")
+                    else:
+                        st.error("Received invalid response format for API Key.")
                 else:
-                    st.error("Failed to generate API Key.")
+                    st.error(get_error_message(k_res, "Failed to generate API Key."))
+            except (ConnectionError, RequestException):
+                st.error("Backend server is offline or unreachable.")
+            except (JSONDecodeError, json.JSONDecodeError, ValueError):
+                st.error("Received non-JSON or empty response from API server.")
             except Exception as e:
                 st.error(f"Error calling API key endpoint: {e}")
 

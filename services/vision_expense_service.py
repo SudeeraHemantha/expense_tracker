@@ -8,6 +8,7 @@ import re
 import json
 from datetime import date
 from typing import Tuple, List, Optional
+from dotenv import load_dotenv
 from PIL import Image
 from sqlalchemy.orm import Session
 
@@ -17,9 +18,27 @@ from schemas.expense_schemas import ExpenseCreate
 from services.expense_service import ExpenseService
 from config.settings import settings
 
+# Load environment variables
+load_dotenv()
+
 
 class VisionExpenseService:
     """Service for OCR vision scanning of receipt images and database logging for users."""
+
+    @staticmethod
+    def validate_llm_api_key() -> str:
+        """Verify that GEMINI_API_KEY or OPENAI_API_KEY environment variable is configured."""
+        key = (
+            os.getenv("GEMINI_API_KEY") or
+            os.getenv("OPENAI_API_KEY") or
+            getattr(settings, "GEMINI_API_KEY", None) or
+            getattr(settings, "OPENAI_API_KEY", None)
+        )
+        if not key or not str(key).strip():
+            raise ValueError(
+                "LLM API Key missing: Please configure GEMINI_API_KEY or OPENAI_API_KEY in your environment (.env file) to use AI vision receipt OCR parsing."
+            )
+        return str(key).strip()
 
     @staticmethod
     def parse_receipt_image(
@@ -29,6 +48,8 @@ class VisionExpenseService:
         mime_type: str = "image/jpeg"
     ) -> ReceiptParseResponse:
         """Parse raw receipt image bytes using AI Vision SDK or offline fallback."""
+        VisionExpenseService.validate_llm_api_key()
+
         if not image_bytes:
             raise ValueError("Image data buffer cannot be empty.")
 

@@ -4,9 +4,13 @@ Uses Pydantic BaseSettings and SettingsConfigDict.
 """
 
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+from dotenv import load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Ensure environment variables from .env are explicitly loaded
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -45,6 +49,16 @@ class Settings(BaseSettings):
     ALERT_THRESHOLD_PERCENTAGE: float = Field(
         default=80.0,
         description="Budget alert warning threshold percentage"
+    )
+
+    # LLM API Key Settings
+    GEMINI_API_KEY: Optional[str] = Field(
+        default=None,
+        description="Google Gemini LLM API Key"
+    )
+    OPENAI_API_KEY: Optional[str] = Field(
+        default=None,
+        description="OpenAI LLM API Key"
     )
 
     # JWT Authentication & Token Security Settings

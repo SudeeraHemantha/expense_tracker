@@ -7,6 +7,7 @@ import re
 import json
 from datetime import date, timedelta
 from typing import Optional, List, Tuple
+from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
 from database.models import Expense, Category
@@ -15,9 +16,27 @@ from schemas.expense_schemas import ExpenseCreate
 from services.expense_service import ExpenseService
 from config.settings import settings
 
+# Load environment variables
+load_dotenv()
+
 
 class AIExpenseService:
     """Service for parsing natural language text into structured transactions per user."""
+
+    @staticmethod
+    def validate_llm_api_key() -> str:
+        """Verify that GEMINI_API_KEY or OPENAI_API_KEY environment variable is configured."""
+        key = (
+            os.getenv("GEMINI_API_KEY") or
+            os.getenv("OPENAI_API_KEY") or
+            getattr(settings, "GEMINI_API_KEY", None) or
+            getattr(settings, "OPENAI_API_KEY", None)
+        )
+        if not key or not str(key).strip():
+            raise ValueError(
+                "LLM API Key missing: Please configure GEMINI_API_KEY or OPENAI_API_KEY in your environment (.env file) to use AI natural language parsing."
+            )
+        return str(key).strip()
 
     @staticmethod
     def parse_natural_language(
@@ -26,6 +45,8 @@ class AIExpenseService:
         ref_date: Optional[date] = None
     ) -> ParsedExpenseResponse:
         """Parse natural language text into structured expense response."""
+        AIExpenseService.validate_llm_api_key()
+
         if not text or not text.strip():
             raise ValueError("Input text cannot be empty.")
 

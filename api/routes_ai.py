@@ -36,6 +36,11 @@ def parse_and_log_expense(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to parse natural language expense: {str(e)}"
+        )
 
 
 @router.post("/parse-receipt", status_code=status.HTTP_201_CREATED, summary="Parse receipt image via AI Vision OCR")
@@ -72,4 +77,9 @@ async def parse_and_log_receipt(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to parse receipt image: {str(e)}"
         )

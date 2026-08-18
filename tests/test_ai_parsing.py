@@ -46,6 +46,18 @@ def test_empty_text_raises_value_error():
         AIExpenseService.parse_natural_language("", available_categories=["Food"])
 
 
+def test_missing_api_key_raises_descriptive_error(monkeypatch):
+    """Verify clear error message is raised when GEMINI_API_KEY / OPENAI_API_KEY are missing."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    from config.settings import settings
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", None)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", None)
+
+    with pytest.raises(ValueError, match="LLM API Key missing"):
+        AIExpenseService.validate_llm_api_key()
+
+
 # --- Integration Tests ---
 def test_api_ai_parse_expense_endpoint(client, test_user, auth_headers):
     """Integration test verifying POST /api/ai/parse-expense creates an expense record in DB with auth."""
@@ -58,3 +70,17 @@ def test_api_ai_parse_expense_endpoint(client, test_user, auth_headers):
     assert data["currency"] == "LKR"
     assert "Spent 4500 LKR" in data["description"]
     assert "AI Parsed" in data["notes"]
+
+
+def test_api_ai_parse_expense_general_exception_returns_http_400(client, test_user, auth_headers, monkeypatch):
+    """Verify backend exception returns HTTP 400 with descriptive message instead of 500 server crash."""
+    def mock_fail(*args, **kwargs):
+        raise RuntimeError("LLM parsing service internal error")
+
+    monkeypatch.setattr(AIExpenseService, "parse_and_create_expense", mock_fail)
+
+    payload = {"text": "Spent 1000 LKR for taxi today"}
+    res = client.post("/api/ai/parse-expense", json=payload, headers=auth_headers)
+
+    assert res.status_code == 400
+    assert "Failed to parse natural language expense" in res.json()["detail"]

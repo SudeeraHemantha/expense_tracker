@@ -20,6 +20,11 @@ for p in [str(project_root), str(parent_dir)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
+import os
+
+# Set mock GEMINI_API_KEY for pytest suite execution
+os.environ.setdefault("GEMINI_API_KEY", "mock_gemini_key_for_testing")
+
 from database.connection import Base, get_db
 from database.models import User
 from services.auth_service import AuthService
