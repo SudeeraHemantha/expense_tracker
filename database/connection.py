@@ -40,10 +40,12 @@ def get_db() -> Generator[Session, None, None]:
 def init_db() -> None:
     """
     Create database tables if they do not exist, auto-migrate missing columns,
-    and fallback to drop-and-recreate in local development mode if schema corruption/mismatch occurs.
+    and handle serverless / Vercel runtime environments gracefully.
     """
-    # Ensure models are imported so Base.metadata contains all tables
     import database.models  # noqa: F401
+    import os
+
+    is_vercel = os.getenv("VERCEL") == "1" or bool(os.getenv("VERCEL")) or bool(os.getenv("SERVERLESS"))
 
     try:
         # 1. Create missing tables
@@ -78,8 +80,7 @@ def init_db() -> None:
             conn.execute(text("SELECT id, email, refresh_token_hash, api_key_hash FROM users LIMIT 1"))
 
     except Exception as e:
-        import os
-        if os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("SERVERLESS"):
+        if is_vercel:
             print(f"[Database Init Serverless] Notice: {e}. Ensuring tables exist...")
             try:
                 Base.metadata.create_all(bind=engine)
@@ -94,4 +95,7 @@ def init_db() -> None:
             except Exception as drop_err:
                 print(f"[Database Init] Could not recreate tables: {drop_err}")
         else:
-            raise e
+            try:
+                Base.metadata.create_all(bind=engine)
+            except Exception:
+                pass

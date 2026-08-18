@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Ensure environment variables from .env are explicitly loaded
+# Ensure environment variables from .env are explicitly loaded if present
 load_dotenv()
 
 
@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     APP_NAME: str = Field(default="Expense Tracker API", description="Name of the application")
     APP_ENV: str = Field(default="development", description="Execution environment")
-    DEBUG: bool = Field(default=True, description="Enable debug mode")
+    DEBUG: bool = Field(default=False, description="Enable debug mode")
 
     BASE_DIR: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parent.parent,
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
         description="Data storage directory"
     )
     DB_PATH: str = Field(
-        default="sqlite:///./data/expenses.db",
+        default="sqlite:////tmp/expenses.db",
         description="SQLite database path or connection URL"
     )
     DEFAULT_CURRENCY: str = Field(
@@ -63,7 +63,7 @@ class Settings(BaseSettings):
 
     # JWT Authentication & Token Security Settings
     SECRET_KEY: str = Field(
-        default="expense_tracker_production_secret_key_antigravity_2026",
+        default="production-secret-key-fallback-32-chars",
         description="Secret key for signing JWT tokens"
     )
     ALGORITHM: str = Field(
@@ -78,6 +78,47 @@ class Settings(BaseSettings):
         default=30,
         description="JWT Refresh Token expiration time in days (30 days)"
     )
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug(cls, v: Any) -> bool:
+        if isinstance(v, str):
+            v_low = v.strip().lower()
+            if v_low in ("true", "1", "yes", "on", "t"):
+                return True
+            if v_low in ("false", "0", "no", "off", "f", ""):
+                return False
+        return bool(v) if v is not None else False
+
+    @field_validator("ACCESS_TOKEN_EXPIRE_MINUTES", mode="before")
+    @classmethod
+    def parse_token_expire(cls, v: Any) -> int:
+        if v is None or v == "":
+            return 30
+        try:
+            return int(v)
+        except Exception:
+            return 30
+
+    @field_validator("REFRESH_TOKEN_EXPIRE_DAYS", mode="before")
+    @classmethod
+    def parse_refresh_expire(cls, v: Any) -> int:
+        if v is None or v == "":
+            return 30
+        try:
+            return int(v)
+        except Exception:
+            return 30
+
+    @field_validator("ALERT_THRESHOLD_PERCENTAGE", mode="before")
+    @classmethod
+    def parse_alert_threshold(cls, v: Any) -> float:
+        if v is None or v == "":
+            return 80.0
+        try:
+            return float(v)
+        except Exception:
+            return 80.0
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -102,6 +143,7 @@ class Settings(BaseSettings):
         """
         import os
         if (
+            os.getenv("VERCEL") == "1" or
             os.getenv("VERCEL") or
             os.getenv("VERCEL_ENV") or
             os.getenv("AWS_LAMBDA_FUNCTION_NAME") or
